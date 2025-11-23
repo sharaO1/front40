@@ -338,6 +338,11 @@ export default function Sales() {
   const { toast } = useToast();
 
   const handleBarcodeScanned = (sku: string) => {
+    // Ignore barcode if an item is already selected but not added yet
+    if (currentItem.productId) {
+      return;
+    }
+
     const product = products.find(
       (p) => p.sku?.toLowerCase() === sku.toLowerCase(),
     );
@@ -350,37 +355,56 @@ export default function Sales() {
       return;
     }
 
-    if (isCreateDialogOpen) {
-      setCurrentItem({
-        productId: product.id,
-        productName: product.name,
-        quantity: 1,
-        unitPrice: product.unitPrice,
-        discount: 0,
-      });
-      setTimeout(() => {
-        addItemToInvoice();
-      }, 50);
-    } else {
-      setCurrentItem({
-        productId: product.id,
-        productName: product.name,
-        quantity: 1,
-        unitPrice: product.unitPrice,
-        discount: 0,
-      });
+    const wasDialogClosed = !isCreateDialogOpen;
+
+    setCurrentItem({
+      productId: product.id,
+      productName: product.name,
+      quantity: 1,
+      unitPrice: product.unitPrice,
+      discount: 0,
+    });
+
+    if (wasDialogClosed) {
       setIsCreateDialogOpen(true);
+      // Give dialog time to render and receive focus
+      setTimeout(() => {
+        window.focus();
+      }, 100);
     }
   };
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Enter" && barcodeBuffer.trim().length > 0) {
+      const activeElement = document.activeElement as HTMLElement;
+      const isQuantityInput = activeElement?.id === "quantity";
+      const isOtherInput =
+        (activeElement?.tagName === "INPUT" && !isQuantityInput) ||
+        activeElement?.tagName === "TEXTAREA";
+
+      // Handle Enter key (only if not typing in a non-quantity input field)
+      if (event.key === "Enter" && !isOtherInput) {
         event.preventDefault();
-        handleBarcodeScanned(barcodeBuffer.trim());
-        setBarcodeBuffer("");
-        if (barcodeTimeoutRef.current) {
-          clearTimeout(barcodeTimeoutRef.current);
+
+        // If a product is selected, add item to invoice
+        if (currentItem.productId) {
+          addItemToInvoice();
+          return;
+        }
+
+        // If barcodeBuffer has content, treat as barcode scan
+        if (barcodeBuffer.trim().length > 0) {
+          handleBarcodeScanned(barcodeBuffer.trim());
+          setBarcodeBuffer("");
+          if (barcodeTimeoutRef.current) {
+            clearTimeout(barcodeTimeoutRef.current);
+          }
+          return;
+        }
+
+        // If no product selected and dialog is open, create invoice
+        if (isCreateDialogOpen) {
+          createInvoice();
         }
         return;
       }
@@ -389,6 +413,35 @@ export default function Sales() {
         return;
       }
 
+      // Don't intercept keyboard if typing in other input fields (except quantity)
+      if (isOtherInput) {
+        return;
+      }
+
+      // If product is selected, allow numbers to be quantity (works even if quantity input is focused)
+      if (currentItem.productId) {
+        const char = event.key;
+        if (/\d/.test(char)) {
+          event.preventDefault();
+          const currentQuantity = currentItem.quantity || 0;
+          const newQuantity = currentQuantity * 10 + parseInt(char);
+          setCurrentItem({
+            ...currentItem,
+            quantity: newQuantity,
+          });
+        } else if (char === "Backspace" || char === "Delete") {
+          event.preventDefault();
+          const currentQuantity = currentItem.quantity || 0;
+          const newQuantity = Math.floor(currentQuantity / 10);
+          setCurrentItem({
+            ...currentItem,
+            quantity: newQuantity,
+          });
+        }
+        return;
+      }
+
+      // Otherwise, treat as barcode input
       const char = event.key;
       if (char.length === 1 && /[a-zA-Z0-9\-]/i.test(char)) {
         event.preventDefault();
@@ -412,7 +465,13 @@ export default function Sales() {
         clearTimeout(barcodeTimeoutRef.current);
       }
     };
-  }, [barcodeBuffer, products, isCreateDialogOpen, handleBarcodeScanned]);
+  }, [
+    barcodeBuffer,
+    products,
+    isCreateDialogOpen,
+    currentItem,
+    handleBarcodeScanned,
+  ]);
 
   const buildInvoiceReport = (inv: Invoice) => {
     const sep = "========================================";
@@ -1267,8 +1326,10 @@ export default function Sales() {
     return { subtotal, taxAmount, total };
   };
 
-  const addItemToInvoice = () => {
-    if (!currentItem.productId || !currentItem.quantity) {
+  const addItemToInvoice = (itemData?: Partial<InvoiceItem>) => {
+    const itemToAdd = itemData || currentItem;
+
+    if (!itemToAdd.productId || !itemToAdd.quantity) {
       toast({
         title: "Error",
         description: "Please select a product and enter quantity",
@@ -1277,7 +1338,7 @@ export default function Sales() {
       return;
     }
 
-    const product = products.find((p) => p.id === currentItem.productId);
+    const product = products.find((p) => p.id === itemToAdd.productId);
     if (!product) {
       toast({
         title: "Error",
@@ -1289,12 +1350,12 @@ export default function Sales() {
 
     const item: InvoiceItem = {
       id: Date.now().toString(),
-      productId: currentItem.productId!,
-      productName: currentItem.productName!,
-      quantity: currentItem.quantity!,
-      unitPrice: currentItem.unitPrice!,
-      discount: currentItem.discount || 0,
-      total: calculateItemTotal(currentItem),
+      productId: itemToAdd.productId!,
+      productName: itemToAdd.productName!,
+      quantity: itemToAdd.quantity!,
+      unitPrice: itemToAdd.unitPrice!,
+      discount: itemToAdd.discount || 0,
+      total: calculateItemTotal(itemToAdd),
     };
 
     const updatedItems = [...(newInvoice.items || []), item];
@@ -2175,15 +2236,11 @@ export default function Sales() {
                                     <span className="font-medium capitalize">
                                       {product.name}
                                     </span>
-                                    <span className="text-sm text-muted-foreground">
-                                      ${price.toFixed(2)}
-                                      {product.category ? (
-                                        <span className="ml-2">
-                                          {" "}
-                                          • {product.category}
-                                        </span>
-                                      ) : null}
-                                    </span>
+                                    {product.category ? (
+                                      <span className="text-sm text-muted-foreground ml-2">
+                                        • {product.category}
+                                      </span>
+                                    ) : null}
                                   </div>
                                 </SelectItem>
                               );
@@ -2647,15 +2704,11 @@ export default function Sales() {
                                     <span className="font-medium capitalize">
                                       {product.name}
                                     </span>
-                                    <span className="text-sm text-muted-foreground">
-                                      ${price.toFixed(2)}
-                                      {product.category ? (
-                                        <span className="ml-2">
-                                          {" "}
-                                          • {product.category}
-                                        </span>
-                                      ) : null}
-                                    </span>
+                                    {product.category ? (
+                                      <span className="text-sm text-muted-foreground ml-2">
+                                        • {product.category}
+                                      </span>
+                                    ) : null}
                                   </div>
                                 </SelectItem>
                               );
